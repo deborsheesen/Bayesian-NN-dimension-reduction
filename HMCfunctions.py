@@ -36,26 +36,26 @@ def leapfrog(nn_model, n_leapfrog, delta_leapfrog, shapes, x, y) :
     
     # half step for momentum at beginning
     for (i, param) in enumerate(nn_model.parameters()) :
-        mom[i].data.add_(-delta_leapfrog/2*param.grad)          # prior for params?
+        mom[i].data.add_(-delta_leapfrog/2*(param.grad+1/2))          # prior for params?
     
     # leapfrog steps:
     for l in range(n_leapfrog) :
         # Full step for position
         for (i, param) in enumerate(nn_model.parameters()) :
             #param.data.add_(delta_leapfrog*torch.mul(M_inv[i],mom[i]))
-            param.data.add_(-delta_leapfrog*mom[i])   
+            param.data.add_(-delta_leapfrog*mom[i])
         
-        # update gradients based on new parameters (new positions):
+        # update gradients based on new parameters (ie, new positions):
         update_grads(nn_model, x, y)
         
         # full step for momentum, except at end 
         if l != (n_leapfrog-1) :
             for (i, param) in enumerate(nn_model.parameters()) :
-                mom[i].data.add_(-delta_leapfrog*param.grad)    # prior for params?
+                mom[i].data.add_(-delta_leapfrog*(param.grad+1/2))    # N(0,1) prior for params (?)
                 
     # half step for momentum at end :
     for (i, param) in enumerate(nn_model.parameters()) :
-        mom[i].data.add_(-delta_leapfrog/2*param.grad)          # prior for params?
+        mom[i].data.add_(-delta_leapfrog/2*(param.grad+1/2))          # N(0,1) prior for params (?)
         # Negate momentum at end to make proposal symmetric
         mom[i].mul_(-1)
 
@@ -78,9 +78,6 @@ def HMC_1step(nn_model, n_leapfrog, delta_leapfrog, shapes, x, y, criterion, sig
     else :
         return current_nn_model, 0 
     
-    
-def init_normal(m):
-    if type(m) == nn.Linear:
-        nn.init.normal_(m.weight)
+ 
         
         
