@@ -30,7 +30,13 @@ def generate_momentum(shapes) :
 def eval_kinetic_energy(mom_list) :
     return sum([(mom**2).sum().data for mom in mom_list])
 
-def leapfrog(nn_model, n_leapfrog, delta_leapfrog, shapes, x, y) :
+def eval_potential_energy(nn_model, x, y, prior_sigma, error_sigma=1) :
+    energy = nn.MSELoss()(nn_model(x), y).data/(2*error_sigma**2)
+    for param in nn_model.parameters() :
+        energy += (param.data**2).sum()/(2*prior_sigma**2)
+    return energy.detach()
+
+def leapfrog(nn_model, n_leapfrog, delta_leapfrog, shapes, x, y, prior_sigma, error_sigma=1) :
     
     update_grads(nn_model, x, y)
     
@@ -39,7 +45,7 @@ def leapfrog(nn_model, n_leapfrog, delta_leapfrog, shapes, x, y) :
     
     # half step for momentum at beginning
     for (i, param) in enumerate(nn_model.parameters()) :
-        mom_change = -delta_leapfrog/2*(torch.add(param.grad,param))
+        mom_change = -delta_leapfrog/2*(torch.add(param.grad/(2*prior_sigma**2),param/(2*prior_sigma**2)))
         mom[i].data.add_(mom_change)          
     
     # leapfrog steps:
@@ -56,28 +62,28 @@ def leapfrog(nn_model, n_leapfrog, delta_leapfrog, shapes, x, y) :
         # full step for momentum, except at end 
         if l != (n_leapfrog-1) :
             for (i, param) in enumerate(nn_model.parameters()) :
-                mom_change = -delta_leapfrog*(torch.add(param.grad,param))
+                mom_change = -delta_leapfrog*(torch.add(param.grad/(2*error_sigma**2),param/(2*prior_sigma**2)))
                 mom[i].data.add_(mom_change)                # N(0,1) prior for params (?)
                 
     # half step for momentum at end :
     for (i, param) in enumerate(nn_model.parameters()) :
-        mom_change = -delta_leapfrog/2*(torch.add(param.grad,param))
+        mom_change = -delta_leapfrog/2*(torch.add(param.grad/(2*error_sigma**2),param/(2*prior_sigma**2)))
         mom[i].data.add_(mom_change)           # N(0,1) prior for params (?)
         # Negate momentum at end to make proposal symmetric
         mom[i].mul_(-1)
 
     return mom, current_mom, nn_model
 
-def HMC_1step(nn_model, n_leapfrog, delta_leapfrog, shapes, x, y, criterion, sigma) :
+def HMC_1step(nn_model, n_leapfrog, delta_leapfrog, shapes, x, y, criterion, prior_sigma) :
     
     current_nn_model = copy.deepcopy(nn_model)
-    proposed_mom, current_mom, proposed_nn_model = leapfrog(nn_model, n_leapfrog, delta_leapfrog, shapes, x, y)
+    proposed_mom, current_mom, proposed_nn_model = leapfrog(nn_model, n_leapfrog, delta_leapfrog, shapes, x, y, prior_sigma)
     
     # Evaluate potential and kinetic energies at start and end 
     current_K = eval_kinetic_energy(current_mom)
     proposed_K = eval_kinetic_energy(proposed_mom)
-    current_U = nn.MSELoss()(current_nn_model(x), y).data/2
-    proposed_U = nn.MSELoss()(proposed_nn_model(x), y).data/2
+    current_U = eval_potential_energy(current_nn_model, x, y, prior_sigma)
+    proposed_U = eval_potential_energy(proposed_nn_model, x, y, prior_sigma)
     
     # Accept/reject
     if npr.rand() < np.exp(current_U + current_K - proposed_U - proposed_K) :
@@ -129,17 +135,23 @@ ESS using Geyer IAT:
 
 def find_ESS(chain, shapes, to_print=False) :
     ESS = []
+    means = []
+    Vars = []
     T = chain[0].size()[0]
     for (i, shape) in enumerate(shapes) :
         for j in range(shape[0]) :
             if len(list(shape)) == 1 :
                 ESS.append(int(T/gewer_estimate_IAT(chain[i][:,j].numpy())))
+                means.append(chain[i][:,j].mean())
+                Vars.append(chain[i][:,j].var())
                 if to_print :
                     print("ESS: %s/%s" % (int(T/gewer_estimate_IAT(chain[i][:,j].numpy())), T))
             else :
                 for k in range(shape[1]) :
                     ESS.append(int(T/gewer_estimate_IAT(chain[i][:,j,k].numpy())))
+                    means.append(chain[i][:,j,k].mean())
+                    Vars.append(chain[i][:,j,k].var())
                     if to_print :
                         print("ESS: %s/%s" % (int(T/gewer_estimate_IAT(chain[i][:,j,k].numpy())), T))
                     
-    return np.asarray(ESS)
+    return np.asarray(ESS), np.asarray(means), np.asarray(Vars)
