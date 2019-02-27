@@ -30,11 +30,28 @@ def generate_momentum(shapes) :
 def eval_kinetic_energy(mom_list) :
     return sum([(mom**2).sum().data for mom in mom_list])
 
-def eval_potential_energy(nn_model, x, y, prior_sigma, error_sigma=1) :
-    energy = nn.MSELoss()(nn_model(x), y).data/(2*error_sigma**2)
+def eval_potential_energy(nn_model, x, y, prior_sigma, error_sigma) :
+    #from likelihood:
+    pot_energy = nn.MSELoss()(nn_model(x), y).data/(2*error_sigma**2)
+    
+    # from prior:
     for param in nn_model.parameters() :
-        energy += (param.data**2).sum()/(2*prior_sigma**2)
-    return energy.detach()
+        pot_energy += (param**2).sum().data/(2*prior_sigma**2)
+    
+    return pot_energy.detach()
+
+def update_mom(mom, nn_model, delta_leapfrog, prior_sigma, error_sigma) :
+    for (i, param) in enumerate(nn_model.parameters()) :
+        log_ll_grad = param.grad/(2*error_sigma**2)
+        log_pr_grad = param/(2*prior_sigma**2)
+        log_pr_grad = 0
+        mom_change = -delta_leapfrog*(torch.add(log_ll_grad,log_pr_grad))
+        mom[i].data.add_(mom_change) 
+        
+def update_pos(mom, nn_model, delta_leapfrog, prior_sigma, error_sigma) :
+    for (i, param) in enumerate(nn_model.parameters()) :
+        pos_change = delta_leapfrog*mom[i]
+        param.data.add_(pos_change)
 
 def leapfrog(nn_model, n_leapfrog, delta_leapfrog, shapes, x, y, prior_sigma, error_sigma=1) :
     
@@ -44,37 +61,29 @@ def leapfrog(nn_model, n_leapfrog, delta_leapfrog, shapes, x, y, prior_sigma, er
     current_mom = copy.deepcopy(mom) # keep copy of initial momentum 
     
     # half step for momentum at beginning
-    for (i, param) in enumerate(nn_model.parameters()) :
-        mom_change = -delta_leapfrog/2*(torch.add(param.grad/(2*prior_sigma**2),param/(2*prior_sigma**2)))
-        mom[i].data.add_(mom_change)          
+    update_mom(mom, nn_model, delta_leapfrog/2, prior_sigma, error_sigma)        
     
     # leapfrog steps:
     for l in range(n_leapfrog) :
         # Full step for position
-        for (i, param) in enumerate(nn_model.parameters()) :
-            #param.data.add_(delta_leapfrog*torch.mul(M_inv[i],mom[i]))
-            pos_change = delta_leapfrog*mom[i]
-            param.data.add_(pos_change)
-        
+        update_pos(mom, nn_model, delta_leapfrog, prior_sigma, error_sigma)
         # update gradients based on new parameters (ie, new positions):
         update_grads(nn_model, x, y)
         
         # full step for momentum, except at end 
         if l != (n_leapfrog-1) :
-            for (i, param) in enumerate(nn_model.parameters()) :
-                mom_change = -delta_leapfrog*(torch.add(param.grad/(2*error_sigma**2),param/(2*prior_sigma**2)))
-                mom[i].data.add_(mom_change)                # N(0,1) prior for params (?)
+            update_mom(mom, nn_model, delta_leapfrog, prior_sigma, error_sigma)
                 
     # half step for momentum at end :
-    for (i, param) in enumerate(nn_model.parameters()) :
-        mom_change = -delta_leapfrog/2*(torch.add(param.grad/(2*error_sigma**2),param/(2*prior_sigma**2)))
-        mom[i].data.add_(mom_change)           # N(0,1) prior for params (?)
-        # Negate momentum at end to make proposal symmetric
+    update_mom(mom, nn_model, delta_leapfrog/2, prior_sigma, error_sigma)
+        
+    # Negate momentum at end to make proposal symmetric
+    for i in range(len(mom)) :
         mom[i].mul_(-1)
 
     return mom, current_mom, nn_model
 
-def HMC_1step(nn_model, n_leapfrog, delta_leapfrog, shapes, x, y, criterion, prior_sigma) :
+def HMC_1step(nn_model, n_leapfrog, delta_leapfrog, shapes, x, y, criterion, prior_sigma, error_sigma=1) :
     
     current_nn_model = copy.deepcopy(nn_model)
     proposed_mom, current_mom, proposed_nn_model = leapfrog(nn_model, n_leapfrog, delta_leapfrog, shapes, x, y, prior_sigma)
@@ -82,8 +91,8 @@ def HMC_1step(nn_model, n_leapfrog, delta_leapfrog, shapes, x, y, criterion, pri
     # Evaluate potential and kinetic energies at start and end 
     current_K = eval_kinetic_energy(current_mom)
     proposed_K = eval_kinetic_energy(proposed_mom)
-    current_U = eval_potential_energy(current_nn_model, x, y, prior_sigma)
-    proposed_U = eval_potential_energy(proposed_nn_model, x, y, prior_sigma)
+    current_U = eval_potential_energy(current_nn_model, x, y, prior_sigma, error_sigma)
+    proposed_U = eval_potential_energy(proposed_nn_model, x, y, prior_sigma, error_sigma)
     
     # Accept/reject
     if npr.rand() < np.exp(current_U + current_K - proposed_U - proposed_K) :
@@ -101,7 +110,7 @@ def compute_acf(X):
     """
     use FFT to compute AutoCorrelation Function
     """
-    Y = ( X - np.mean(X) ) / np.std(X)
+    Y = (X-np.mean(X))/np.std(X)
     acf = sp.fftconvolve(Y,Y[::-1], mode='full') / Y.size
     acf = acf[Y.size:]
     return acf
