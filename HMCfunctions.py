@@ -28,30 +28,32 @@ def generate_momentum(shapes) :
     return mom
 
 def eval_kinetic_energy(mom_list) :
-    return sum([(mom**2).sum().data for mom in mom_list])
+    return sum([(mom**2).sum().data for mom in mom_list])/2
 
 def eval_potential_energy(nn_model, x, y, prior_sigma, error_sigma) :
+    N, k = np.shape(y)
     #from likelihood:
-    pot_energy = nn.MSELoss()(nn_model(x), y).data/(2*error_sigma**2)
-    
+    pot_energy = N*nn.MSELoss()(nn_model(x), y).data/(2*error_sigma**2)
     # from prior:
     for param in nn_model.parameters() :
         pot_energy += (param**2).sum().data/(2*prior_sigma**2)
     
     return pot_energy.detach()
 
-def update_mom(mom, nn_model, delta_leapfrog, prior_sigma, error_sigma) :
+def update_mom(mom, nn_model, delta_leapfrog, x, y, prior_sigma, error_sigma) :
+    N, k = np.shape(y)
     for (i, param) in enumerate(nn_model.parameters()) :
-        log_ll_grad = param.grad/(2*error_sigma**2)
-        log_pr_grad = param/(2*prior_sigma**2)
-        log_pr_grad = 0
+        log_ll_grad = N*param.grad/(2*error_sigma**2)
+        log_pr_grad = param/prior_sigma**2
         mom_change = -delta_leapfrog*(torch.add(log_ll_grad,log_pr_grad))
         mom[i].data.add_(mom_change) 
         
-def update_pos(mom, nn_model, delta_leapfrog, prior_sigma, error_sigma) :
+def update_pos(mom, nn_model, delta_leapfrog, x, y, prior_sigma, error_sigma) :
     for (i, param) in enumerate(nn_model.parameters()) :
         pos_change = delta_leapfrog*mom[i]
         param.data.add_(pos_change)
+    # update gradients based on new parameters (ie, new positions):
+    update_grads(nn_model, x, y)
 
 def leapfrog(nn_model, n_leapfrog, delta_leapfrog, shapes, x, y, prior_sigma, error_sigma=1) :
     
@@ -61,21 +63,19 @@ def leapfrog(nn_model, n_leapfrog, delta_leapfrog, shapes, x, y, prior_sigma, er
     current_mom = copy.deepcopy(mom) # keep copy of initial momentum 
     
     # half step for momentum at beginning
-    update_mom(mom, nn_model, delta_leapfrog/2, prior_sigma, error_sigma)        
+    update_mom(mom, nn_model, delta_leapfrog/2, x, y, prior_sigma, error_sigma)        
     
     # leapfrog steps:
     for l in range(n_leapfrog) :
         # Full step for position
-        update_pos(mom, nn_model, delta_leapfrog, prior_sigma, error_sigma)
-        # update gradients based on new parameters (ie, new positions):
-        update_grads(nn_model, x, y)
+        update_pos(mom, nn_model, delta_leapfrog, x, y, prior_sigma, error_sigma)
         
         # full step for momentum, except at end 
-        if l != (n_leapfrog-1) :
-            update_mom(mom, nn_model, delta_leapfrog, prior_sigma, error_sigma)
+        if l < n_leapfrog-1 :
+            update_mom(mom, nn_model, delta_leapfrog, x, y, prior_sigma, error_sigma)
                 
     # half step for momentum at end :
-    update_mom(mom, nn_model, delta_leapfrog/2, prior_sigma, error_sigma)
+    update_mom(mom, nn_model, delta_leapfrog/2, x, y, prior_sigma, error_sigma)
         
     # Negate momentum at end to make proposal symmetric
     for i in range(len(mom)) :
