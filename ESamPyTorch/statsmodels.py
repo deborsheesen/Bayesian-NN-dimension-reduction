@@ -87,8 +87,7 @@ class StatsModel(models.Model):
         return np.exp(self.log_posterior(params, mb))
     
     def log_posterior(self, params, mb=None):
-        # Optional step to turn params from vector into preferred format
-        # e.g. a matrix in the case of multiclass logistic regression
+        
         params = self.internal(params)
         
         if mb is None:

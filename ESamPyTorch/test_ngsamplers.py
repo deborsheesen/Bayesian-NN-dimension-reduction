@@ -58,6 +58,7 @@ plt.show()
 prior = models.IsotropicGaussian(mean=np.zeros(data_dim), var=100*np.ones(data_dim))
 model = models.BayesianLogisticRegression(dim=2, prior=prior)
 model.set_data(training_data = [X,Y])
+
 repmodel = models.ReplicatedStatsModel(model, # model specifying target density 
                                           nreplicas=10 # number of replicas/copies to be created
                                          )
@@ -79,7 +80,7 @@ sampler = ngsamplers.NGEnsembleQuasiNewton(repmodel,
 '''
 op = outp.BufferedOutputsheduler(sampler, 
                                  Nsteps=1000, 
-                                 varname_list=['q'], 
+                                 varname_list=['q','p'], 
                                  modprnt=1)
 sampler.run(initial_values={'q' : np.random.normal(0.0,1.0, repmodel.dim),
                             'xi' : np.ones(repmodel.dim)
