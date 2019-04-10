@@ -18,48 +18,63 @@ class model(object):
         self.error_sigma = error_sigma
         self.nn_model = nn_model
         
-    def get_shapes(self) :
+    def shape(self) :
         shapes = []
         for param in self.nn_model.parameters() :
             shapes.append(param.shape)
         return shapes
     
-    def update_grads(self) :
+    def update_grad(self) :
         for param in self.nn_model.parameters() :
             if not (param.grad is None) :
                 param.grad.data.zero_()
+        if not (self.x.grad is None) :
+            self.x.grad.data.zero_()
         loss = nn.MSELoss()(self.nn_model(self.x), self.y)
         loss.backward(retain_graph=True)
 
     def init_normal(self):
         if type(self.nn_model) == nn.Linear:
             self.nn_model.init.normal_(self.nn_model.weight)
+        self.x.data = torch.randn(np.shape(self.x))
+        self.update_grad()
 
     def n_params(self) :
-        return sum(p.numel() for p in self.nn_model.parameters())
+        return (sum(p.numel() for p in self.nn_model.parameters()) + np.prod(np.shape(self.x))).item()
 
     def extract_params(self) :
-        return torch.cat([param.view(-1) for param in self.nn_model.parameters()]).data
+        return torch.cat([torch.cat([param.view(-1) for param in self.nn_model.parameters()]), self.x.view(-1)]).data
 
-    def extract_grads(self) :
-        return torch.cat([param.grad.view(-1) for param in self.nn_model.parameters()])
+    def grad(self) :
+        return torch.cat([torch.cat([param.grad.view(-1) for param in self.nn_model.parameters()]), self.x.grad.view(-1)]).data
     
     
     
-
 def set_params(param, model) :
     assert len(param) == model.n_params(), "Number of parameters do not match"
-    shapes = model.get_shapes()
+    shapes = model.shape()
     counter = 0
     for i, parameter in enumerate(model.nn_model.parameters()) :
         parameter.data = param[counter:(counter+np.prod(shapes[i]))].reshape(shapes[i])
         counter += np.prod(shapes[i])  
-    model.update_grads()  
+    model.x.data = param[counter::].data.reshape(np.shape(model.x)).clone()
+    model.update_grad()  
+        
+        
+        
+class BAOAB(object) :
+    def __init__(self, model, T, mom=1, chain=0):
+        # self.radius is an instance variable
+        self.model = model
+        self.T = T
+        self.mom = mom
+        self.chain = chain
+        
         
         
         
 class HMC(object) :
-    def __init__(self, model, M, n_leapfrog, delta_leapfrog, T, mom=1, chain=0):
+    def __init__(self, model, M, n_leapfrog, delta_leapfrog, T, mom=1, chain=0, minlf=50, maxlf=500):
         # self.radius is an instance variable
         self.model = model
         self.M = M
@@ -68,58 +83,61 @@ class HMC(object) :
         self.T = T
         self.mom = mom
         self.chain = chain
+        self.minlf = minlf
+        self.maxlf = maxlf
         
         
     def generate_momentum(self) :
         return torch.randn(self.model.n_params())
 
-    def eval_kinetic_energy(self) :
+    def kinetic_energy(self) :
         return (self.mom**2/torch.diagonal(self.M)).sum().data/2
 
-    def eval_potential_energy(self) :
-        N, k = np.shape(self.model.y)
+    def potential_energy(self) :
+        N = np.shape(self.model.y)[0]
         #from likelihood:
         pot_energy = N*nn.MSELoss()(self.model.nn_model(self.model.x), self.model.y).data/(2*self.model.error_sigma**2)
         # from prior:
-        for param in self.model.nn_model.parameters() :
+        for param in self.model.nn_model.parameters() :  # for theta
             pot_energy += (param**2).sum().data/(2*self.model.prior_sigma**2)
+        pot_energy += (self.model.x**2).sum().data/(2*self.model.prior_sigma**2) #for x
 
         return pot_energy.detach()
 
-    def update_mom(self) :
-        N, k = np.shape(self.model.y)
-        param, param_grad = self.model.extract_params(), self.model.extract_grads()
+    def update_momentum(self) :
+        N = np.shape(self.model.y)[0]
+        param, param_grad = self.model.extract_params(), self.model.grad()
         log_ll_grad = N*param_grad/(2*self.model.error_sigma**2)
         log_pr_grad = param/self.model.prior_sigma**2
         mom_change = -self.delta_leapfrog*(torch.add(log_ll_grad,log_pr_grad))
         return self.mom + mom_change  
         
-    def update_pos(self) :
+    def update_position(self) :
         pos_change = self.delta_leapfrog*self.mom/torch.diag(self.M)
         param = self.model.extract_params() + pos_change
         set_params(param, self.model)
         # update gradients based on new parameters (ie, new positions):
-        self.model.update_grads()
+        self.model.update_grad()
         
 
     def leapfrog(self) :
-        self.model.update_grads()
+        self.model.update_grad()
         self.mom = self.generate_momentum()  # Generate momentum variables
-        U_start, K_start = self.eval_potential_energy(), self.eval_kinetic_energy() 
+        U_start, K_start = self.potential_energy(), self.kinetic_energy() 
         # half step for momentum at beginning
-        self.update_mom()        
+        self.update_momentum()        
         # leapfrog steps:
         for l in range(self.n_leapfrog) :
             # Full step for position
-            self.update_pos()
+            self.update_position()
             # full step for momentum, except at end 
             if l < self.n_leapfrog-1 :
-                self.update_mom()
+                self.update_momentum()
         # half step for momentum at end :
-        self.update_mom()
+        self.update_momentum()
         # Negate momentum at end to make proposal symmetric
         self.mom.mul_(-1)
-        U_end, K_end = self.eval_potential_energy(), self.eval_kinetic_energy() 
+        U_end, K_end = self.potential_energy(), self.kinetic_energy() 
         
         return self, U_start, K_start, U_end, K_end
 
@@ -141,12 +159,18 @@ class HMC(object) :
             return self.model.nn_model, 1
         else :
             return current_nnmodel, 0
+        
+    def limitleapfrog(self) :
+        if self.n_leapfrog > self.maxlf :
+            self.n_leapfrog = self.maxlf 
+        elif self.n_leapfrog < self.minlf :
+            self.n_leapfrog = self.minlf
     
     
     def run_HMC(self) :
 
         self.model.init_normal()
-        self.model.update_grads()
+        self.model.update_grad()
         n_accept = 0
 
         self.chain = torch.zeros((self.T+1, self.model.n_params()))
@@ -157,18 +181,19 @@ class HMC(object) :
             #M = torch.diag(m2 - mu**2)
             self.model.nn_model, accept = self.HMC_1step()
             n_accept += accept
-            self.model.update_grads()
+            self.model.update_grad()
             self.chain[t+1] = self.model.extract_params()
-            if n_accept <= 0.4*t :
-                self.delta_leapfrog /= 1.5
+            if n_accept <= 0.2*t :
+                self.n_leapfrog = int(self.n_leapfrog/1.5)
             elif n_accept >= 0.8*t :
-                self.delta_leapfrog *= 1.5
+                self.n_leapfrog *= int(self.n_leapfrog*1.5)
+            self.limitleapfrog()
 
             if ((t+1) % (int(self.T/10)) == 0) or (t+1) == self.T :
                 accept_rate = float(n_accept) / float(t+1)
-                print("iter %6d/%d after %7.1f sec | accept_rate %.3f | MSE loss %.3f" % (
-                      t+1, self.T, time() - start_time, accept_rate, 
-                      nn.MSELoss()(self.model.nn_model(self.model.x), self.model.y)))
+                print("iter %6d/%d after %7.1f min | accept_rate %.3f | MSE loss %.3f | stepsize %f | nleapfrog %f" % (
+                      t+1, self.T, round((time() - start_time)/60,1), accept_rate, 
+                      nn.MSELoss()(self.model.nn_model(self.model.x), self.model.y), self.delta_leapfrog, self.n_leapfrog))
 
     
  
