@@ -74,17 +74,18 @@ class BAOAB(object) :
         
         
 class HMC(object) :
-    def __init__(self, model, M, n_leapfrog, delta_leapfrog, T, mom=1, chain=0, minlf=50, maxlf=500):
+    def __init__(self, model, M, n_leapfrog, stepsize, T, mom=1, chain=0, minlf=50, maxlf=500, minstepsize=1e-3):
         # self.radius is an instance variable
         self.model = model
         self.M = M
         self.n_leapfrog = n_leapfrog
-        self.delta_leapfrog = delta_leapfrog
+        self.stepsize = stepsize
         self.T = T
         self.mom = mom
         self.chain = chain
         self.minlf = minlf
         self.maxlf = maxlf
+        self.minstepsize = minstepsize
         
         
     def generate_momentum(self) :
@@ -109,11 +110,11 @@ class HMC(object) :
         param, param_grad = self.model.extract_params(), self.model.grad()
         log_ll_grad = N*param_grad/(2*self.model.error_sigma**2)
         log_pr_grad = param/self.model.prior_sigma**2
-        mom_change = -self.delta_leapfrog*(torch.add(log_ll_grad,log_pr_grad))
+        mom_change = -self.stepsize*(torch.add(log_ll_grad,log_pr_grad))
         return self.mom + mom_change  
         
     def update_position(self) :
-        pos_change = self.delta_leapfrog*self.mom/torch.diag(self.M)
+        pos_change = self.stepsize*self.mom/torch.diag(self.M)
         param = self.model.extract_params() + pos_change
         set_params(param, self.model)
         # update gradients based on new parameters (ie, new positions):
@@ -165,6 +166,8 @@ class HMC(object) :
             self.n_leapfrog = self.maxlf 
         elif self.n_leapfrog < self.minlf :
             self.n_leapfrog = self.minlf
+        if self.stepsize < self.minstepsize :
+            self.stepsize = self.minstepsize
     
     
     def run_HMC(self) :
@@ -185,15 +188,17 @@ class HMC(object) :
             self.chain[t+1] = self.model.extract_params()
             if n_accept <= 0.2*t :
                 self.n_leapfrog = int(self.n_leapfrog/1.5)
+                self.stepsize /= 1.05
             elif n_accept >= 0.8*t :
                 self.n_leapfrog *= int(self.n_leapfrog*1.5)
+                self.stepsize *= 1.05
             self.limitleapfrog()
 
             if ((t+1) % (int(self.T/10)) == 0) or (t+1) == self.T :
                 accept_rate = float(n_accept) / float(t+1)
-                print("iter %6d/%d after %7.1f min | accept_rate %.3f | MSE loss %.3f | stepsize %f | nleapfrog %f" % (
-                      t+1, self.T, round((time() - start_time)/60,1), accept_rate, 
-                      nn.MSELoss()(self.model.nn_model(self.model.x), self.model.y), self.delta_leapfrog, self.n_leapfrog))
+                print("iter %6d/%d after %.2f min | accept_rate %.3f | MSE loss %.3f | stepsize %.3f | nleapfrog %i" % (
+                      t+1, self.T, (time() - start_time)/60, accept_rate, 
+                      nn.MSELoss()(self.model.nn_model(self.model.x), self.model.y), self.stepsize, self.n_leapfrog))
 
     
  
@@ -236,7 +241,9 @@ def gewer_estimate_IAT(np_mcmc_traj, verbose=False):
     return IAT
              
 
-
+def init_normal(m):
+    if type(m) == nn.Linear:
+        nn.init.uniform_(m.weight)
 
 
 
