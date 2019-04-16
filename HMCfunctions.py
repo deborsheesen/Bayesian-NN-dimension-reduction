@@ -34,8 +34,9 @@ class model(object):
         loss.backward(retain_graph=True)
 
     def init_normal(self):
-        if type(self.nn_model) == nn.Linear:
-            self.nn_model.init.normal_(self.nn_model.weight)
+        for layer in self.nn_model :
+            if type(layer) == nn.Linear :
+                nn.init.normal_(layer.weight)
         self.x.data = torch.randn(np.shape(self.x))
         self.update_grad()
 
@@ -199,6 +200,10 @@ class HMC(object) :
                 print("iter %6d/%d after %.2f min | accept_rate %.3f | MSE loss %.3f | stepsize %.3f | nleapfrog %i" % (
                       t+1, self.T, (time() - start_time)/60, accept_rate, 
                       nn.MSELoss()(self.model.nn_model(self.model.x), self.model.y), self.stepsize, self.n_leapfrog))
+                
+                
+    def ESS(self) :
+        return self.T/[gewer_estimate_IAT(self.chain[i,:].numpy()) for i in range(np.shape(self.chain)[1])]
 
     
  
@@ -241,9 +246,10 @@ def gewer_estimate_IAT(np_mcmc_traj, verbose=False):
     return IAT
              
 
-def init_normal(m):
-    if type(m) == nn.Linear:
-        nn.init.uniform_(m.weight)
+def init_normal(nn_model) :
+    for layer in nn_model :
+        if type(layer) == nn.Linear :
+            nn.init.normal_(layer.weight)
 
 
 
