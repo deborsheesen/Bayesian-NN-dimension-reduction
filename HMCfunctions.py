@@ -96,7 +96,7 @@ class model(object):
 #################################################################################################
 
 
-class Sampler(ABC):
+class Sampler(object) :
     __metaclass__ = abc.ABCMeta
     
     def __init__(self, model):

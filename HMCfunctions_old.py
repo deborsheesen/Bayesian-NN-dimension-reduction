@@ -6,6 +6,7 @@ from scipy import signal as sp
 from time import time
 import matplotlib.pyplot as plt
 from copy import deepcopy
+import abc
 
 from pylab import plot, show, legend
 
@@ -65,7 +66,8 @@ class model(object):
     
 
     
-class sampler(object) :
+class thermostat(object) :
+    
     def __init__(self, model, stepsize, M_precond=0) :
         self.model = model
         self.momentum = torch.randn(self.model.n_params())
@@ -93,7 +95,6 @@ class sampler(object) :
         # update gradients based on new parameters (ie, new positions):
         self.model.update_grad()
         
-        
     def potential_energy(self) :
         N = np.shape(self.model.y)[0]
         #from likelihood:
@@ -109,48 +110,83 @@ class sampler(object) :
     
     def total_energy(self) :
         return self.potential_energy() + self.kinetic_energy()     
-         
+
         
+class sampler(object) :
+
+    __metaclass__ = abc.ABCMeta
+    
+    def __init__(self, thermostat, Nsteps) :
+        self.thermostat = thermostat
+        self.Nsteps = Nsteps
+        self.chain = torch.zeros(self.Nsteps+1, self.thermostat.model.n_params())
+        self.n_accepted = 0
+    
+    def feed(self, t) :
+        self.chain[t+1] = self.thermostat.model.get_params()
+    
+    def ESS(self) :
+        return self.Nsteps/np.asarray([gewer_estimate_IAT(self.chain[:,i].numpy()) for i in range(np.shape(self.chain)[1])])
+    
+    def plot(self) :
+        ypred_final = self.thermostat.model.nn_model(self.thermostat.model.x)
+        plt.plot(list(ypred_final[:,0]), list(ypred_final[:,1]), 'o', markersize=2)
+        plt.grid(True)
+
+    def step(self):
+        raise NotImplementedError()
+        
+    def run(self) :
+        self.feed(0)
+        start_time = time()
+        for t in range(self.Nsteps) :         
+            self.step()
+            self.feed(t)
+            if ((t+1) % (int(self.Nsteps/10)) == 0) or (t+1) == self.Nsteps :
+                print("iter %6d/%d after %.2f min | accept_rate %.3f | MSE loss %.3f" % (
+                      t+1, self.Nsteps, (time() - start_time)/60, float(self.n_accepted) / float(t+1), 
+                      nn.MSELoss()(self.sampler.model.nn_model(self.sampler.model.x), self.sampler.model.y)))
+    
+    
 #################################################################################################
 #--------------------------------------------- HMC ---------------------------------------------#
 #################################################################################################        
         
-class HMC(object) :
-    def __init__(self, sampler, n_leapfrog, Nsteps):
-        self.sampler = sampler
+class HMC(sampler) :
+    
+    __metaclass__ = abc.ABCMeta
+    
+    def __init__(self, n_leapfrog):
         self.n_leapfrog = n_leapfrog
-        self.Nsteps = Nsteps
-        self.chain = torch.zeros(self.Nsteps+1,self.sampler.model.n_params())
         self.minlf = 50
         self.maxlf = 500
         self.minstepsize = 1e-3
-        self.n_accepted = 0
 
 
     def leapfrog(self) :
-        self.sampler.model.update_grad()
-        self.sampler.generate_momentum()  
-        energy_start = self.sampler.total_energy()
+        self.thermostat.model.update_grad()
+        self.thermostat.generate_momentum()  
+        energy_start = self.thermostat.total_energy()
         # half step for momentum at beginning
-        self.sampler.update_momentum(1/2)        
+        self.thermostat.update_momentum(1/2)        
         # leapfrog steps:
         for l in range(self.n_leapfrog) :
             # Full step for position
-            self.sampler.update_position()
+            self.thermostat.update_position()
             # full step for momentum, except at end 
             if l < self.n_leapfrog-1 :
-                self.sampler.update_momentum()
+                self.thermostat.update_momentum()
         # half step for momentum at end :
-        self.sampler.update_momentum(1/2)
+        self.thermostat.update_momentum(1/2)
         # Negate momentum at end to make proposal symmetric
-        self.sampler.momentum.mul_(-1)
-        energy_end = self.sampler.total_energy()
+        self.thermostat.momentum.mul_(-1)
+        energy_end = self.thermostat.total_energy()
         
         return self, energy_start, energy_end
 
-    def HMC_1step(self) :
+    def step(self) :
 
-        start_nn_model = deepcopy(self.sampler.model.nn_model)
+        start_nn_model = deepcopy(self.thermostat.model.nn_model)
         self, energy_start, energy_end = self.leapfrog()
 
         # Accept/reject
@@ -163,7 +199,7 @@ class HMC(object) :
             accepted = (npr.rand() < np.exp(energy_diff))
             self.n_accepted += accepted
             if not accepted :
-                self.sampler.model.nn_model = start_nn_model
+                self.thermostat.model.nn_model = start_nn_model
                 
         del start_nn_model
                 
@@ -173,90 +209,68 @@ class HMC(object) :
             self.n_leapfrog = self.maxlf 
         elif self.n_leapfrog < self.minlf :
             self.n_leapfrog = self.minlf
-        if self.sampler.stepsize < self.minstepsize :
-            self.sampler.stepsize = self.minstepsize
+        if self.thermostat.stepsize < self.minstepsize :
+            self.thermostat.stepsize = self.minstepsize
     
     def adapt_leapfrog(self, t) :
         if self.n_accepted <= 0.2*t :
             self.n_leapfrog = int(self.n_leapfrog/1.5)
-            self.sampler.stepsize /= 1.05
+            self.thermostat.stepsize /= 1.05
         elif self.n_accepted >= 0.8*t :
             self.n_leapfrog *= int(self.n_leapfrog*1.5)
-            self.sampler.stepsize *= 1.05
+            self.thermostat.stepsize *= 1.05
         self.limitleapfrog()
         
-    def feed(self, t) :
-        self.chain[t+1] = self.sampler.model.get_params()
     
-    def sample(self) :
-
-        self.feed(0)
-        start_time = time()
-        for t in range(self.Nsteps) :         
-            self.HMC_1step()
-            #self.adapt_leapfrog(t+1)
-            self.feed(t)
-            if ((t+1) % (int(self.Nsteps/10)) == 0) or (t+1) == self.Nsteps :
-                print("iter %6d/%d after %.2f min | accept_rate %.3f | MSE loss %.3f | stepsize %.3f | nleapfrog %i" % (
-                      t+1, self.Nsteps, (time() - start_time)/60, float(self.n_accepted) / float(t+1), 
-                      nn.MSELoss()(self.sampler.model.nn_model(self.sampler.model.x), self.sampler.model.y), self.sampler.stepsize, self.n_leapfrog))
-                
-    def ESS(self) :
-        return self.Nsteps/np.asarray([gewer_estimate_IAT(self.chain[:,i].numpy()) for i in range(np.shape(self.chain)[1])])
     
-    def plot(self) :
-        ypred_final = self.sampler.model.nn_model(self.sampler.model.x)
-        plt.plot(list(ypred_final[:,0]), list(ypred_final[:,1]), 'o', markersize=2)
-        plt.grid(True)
 
 #################################################################################################
 #-------------------------------------------- BAOAB --------------------------------------------#
 #################################################################################################
         
         
-class BAOAB(object) :
-    def __init__(self, sampler, Nsteps, beta, gamma):
+class BAOAB(sampler) :
+    
+    __metaclass__ = abc.ABCMeta
+    
+    def __init__(self, beta, gamma):
         
-        self.sampler = sampler
-        self.Nsteps = Nsteps
-        self.chain = torch.zeros(self.Nsteps+1,self.sampler.model.n_params())
-        self.n_accepted = 0
         self.beta = beta 
         self.gamma = gamma
-        self.alpha = np.exp(-self.gamma*self.sampler.stepsize)
-        self.Rn = torch.randn(self.sampler.model.n_params())
+        self.alpha = np.exp(-self.gamma*self.thermostat.stepsize)
+        self.Rn = torch.randn(self.thermostat.model.n_params())
         
     def propose(self) :
-        pos, grad = self.sampler.model.get_params(), self.sampler.model.grad()
+        pos, grad = self.thermostat.model.get_params(), self.thermostat.model.grad()
         
         # half step for momentum:
-        self.sampler.update_momentum(1/2)
-        p1 = deepcopy(self.sampler.momentum.data)
+        self.thermostat.update_momentum(1/2)
+        p1 = deepcopy(self.thermostat.momentum.data)
         
         # half step for position:
-        self.sampler.update_position(1/2)
+        self.thermostat.update_position(1/2)
         
         # update momentum with random variables:
-        self.Rn = torch.randn(self.sampler.model.n_params())
-        self.sampler.momentum = self.alpha*self.sampler.momentum + np.sqrt((1-self.alpha**2)/self.beta)*self.Rn
-        p2 = deepcopy(self.sampler.momentum.data)
+        self.Rn = torch.randn(self.thermostat.model.n_params())
+        self.thermostat.momentum = self.alpha*self.thermostat.momentum + np.sqrt((1-self.alpha**2)/self.beta)*self.Rn
+        p2 = deepcopy(self.thermostat.momentum.data)
         
         # half step for position
-        self.sampler.update_position(1/2)
+        self.thermostat.update_position(1/2)
         
         # half step for momentum:
-        self.sampler.update_momentum(1/2)
+        self.thermostat.update_momentum(1/2)
         
         return self, p1, p2
         
     def g(self, x) :
         return torch.exp(-self.beta/(2*(1-self.alpha**2)*torch.norm(x)))
         
-    def MH_step(self) :
-        energy_start = self.sampler.total_energy()
-        model_start, momentum_start = deepcopy(self.sampler.model), deepcopy(self.sampler.momentum)
+    def step(self) :
+        energy_start = self.thermostat.total_energy()
+        model_start, momentum_start = deepcopy(self.thermostat.model), deepcopy(self.thermostat.momentum)
         self, p1, p2 = self.propose()
-        energy_end = self.sampler.total_energy()
+        energy_end = self.thermostat.total_energy()
         accept_ratio = torch.exp(-self.beta*(energy_end-energy_start))*self.g(self.alpha*p2-p1)/self.g(self.Rn)
         #print(accept_ratio)
         u = torch.rand(1)
@@ -265,34 +279,11 @@ class BAOAB(object) :
         self.n_accepted += accepted
         
         if not accepted :                     # if reject
-            self.sampler.model = deepcopy(model_start)   # set position to initial position
-            self.sampler.momentum = deepcopy(-momentum_start)           # momentum has sign flipped
+            self.thermostat.model = deepcopy(model_start)   # set position to initial position
+            self.thermostat.momentum = deepcopy(-momentum_start)           # momentum has sign flipped
             
         del model_start, momentum_start, p1, p2
-        self.sampler.model.update_grad()
-        
-        
-    def feed(self, t) :
-        self.chain[t+1] = self.sampler.model.get_params()
-            
-    def sample(self) :
-        self.feed(0)
-        start_time = time()
-        for t in range(self.Nsteps) :         
-            self.MH_step()
-            self.feed(t)
-            if ((t+1) % (int(self.Nsteps/10)) == 0) or (t+1) == self.Nsteps :
-                print("iter %6d/%d after %.2f min | accept_rate %.3f | MSE loss %.3f" % (
-                      t+1, self.Nsteps, (time() - start_time)/60, float(self.n_accepted) / float(t+1), 
-                      nn.MSELoss()(self.sampler.model.nn_model(self.sampler.model.x), self.sampler.model.y)))
-                
-    def ESS(self) :
-        return self.Nsteps/np.asarray([gewer_estimate_IAT(self.chain[:,i].numpy()) for i in range(np.shape(self.chain)[1])])
-    
-    def plot(self) :
-        ypred_final = self.sampler.model.nn_model(self.sampler.model.x)
-        plt.plot(list(ypred_final[:,0]), list(ypred_final[:,1]), 'o', markersize=2)
-        plt.grid(True)
+        self.thermostat.model.update_grad()
         
         
     
