@@ -145,7 +145,7 @@ class sampler(object) :
             if ((t+1) % (int(self.Nsteps/10)) == 0) or (t+1) == self.Nsteps :
                 print("iter %6d/%d after %.2f min | accept_rate %.3f | MSE loss %.3f" % (
                       t+1, self.Nsteps, (time() - start_time)/60, float(self.n_accepted) / float(t+1), 
-                      nn.MSELoss()(self.sampler.model.nn_model(self.sampler.model.x), self.sampler.model.y)))
+                      nn.MSELoss()(self.thermostat.model.nn_model(self.thermostat.model.x), self.thermostat.model.y)))
     
     
 #################################################################################################
@@ -156,7 +156,8 @@ class HMC(sampler) :
     
     __metaclass__ = abc.ABCMeta
     
-    def __init__(self, n_leapfrog):
+    def __init__(self, thermostat, Nsteps, n_leapfrog):
+        sampler.__init__(self, thermostat, Nsteps)
         self.n_leapfrog = n_leapfrog
         self.minlf = 50
         self.maxlf = 500
@@ -233,8 +234,8 @@ class BAOAB(sampler) :
     
     __metaclass__ = abc.ABCMeta
     
-    def __init__(self, beta, gamma):
-        
+    def __init__(self, thermostat, Nsteps, beta, gamma):
+        sampler.__init__(self, thermostat, Nsteps)
         self.beta = beta 
         self.gamma = gamma
         self.alpha = np.exp(-self.gamma*self.thermostat.stepsize)
