@@ -63,22 +63,74 @@ class model(object):
             counter += np.prod(shapes[i])  
         self.x.data = param[counter::].data.reshape(np.shape(self.x)).clone()
         self.update_grad() 
+        
+        
+        
+        
+class nn_sampler(object):
+    __metaclass__ = abc.ABCMeta
+    '''
+    Base class for samplers
+    '''
     
-
-    
-class thermostat(object) :
-    
-    def __init__(self, model, stepsize, M_precond=0) :
+    def __init__(self, model, Nsteps, M_precond) :
         self.model = model
-        self.momentum = torch.randn(self.model.n_params())
-        self.position = self.model.get_params()
-        self.stepsize = stepsize
+        self.Nsteps = Nsteps
+        self.chain = torch.zeros(self.Nsteps+1, self.model.n_params())
         self.M_precond = M_precond
         if self.M_precond == 0 :
             self.M_precond = torch.eye(self.model.n_params())
+            
+    def plot(self) :
+        ypred_final = self.model.nn_model(self.model.x)
+        plt.plot(list(ypred_final[:,0]), list(ypred_final[:,1]), 'o', markersize=2)
+        plt.grid(True)
+            
+    def ESS(self) :
+        return self.Nsteps/np.asarray([gewer_estimate_IAT(self.chain[:,i].numpy()) for i in range(np.shape(self.chain)[1])])        
+            
+        
+        
+class MH(nn_sampler) :
+    __metaclass__ = abc.ABCMeta
+    '''
+    Base class for MH samplers
+    '''    
+    def __init__(self, model, Nsteps, M_precond) :
+        nn_sampler.__init__(self, model, Nsteps, M_precond)
+        self.n_accepted = 0
+        
+    def propose(self) :
+        raise NotImplementedError()
+        
+    def feed(self, t) :
+        self.chain[t+1] = self.model.get_params()
+        
+    def run(self) :
+        self.feed(0)
+        start_time = time()
+        for t in range(self.Nsteps) :         
+            self.step()
+            self.feed(t)
+            if ((t+1) % (int(self.Nsteps/10)) == 0) or (t+1) == self.Nsteps :
+                print("iter %6d/%d after %.2f min | accept_rate %.1f percent | MSE loss %.3f" % (
+                      t+1, self.Nsteps, (time() - start_time)/60, 100*float(self.n_accepted) / float(t+1), 
+                      nn.MSELoss()(self.model.nn_model(self.model.x), self.model.y)))
+    
+    
+        
+class kineticMH(MH) :
+    __metaclass__ = abc.ABCMeta
+    
+    def __init__(self, model, Nsteps, M_precond, stepsize) :
+        
+        MH.__init__(self, model, Nsteps, M_precond)
+        self.momentum = torch.randn(self.model.n_params())
+        self.position = self.model.get_params()
+        self.stepsize = stepsize
         
     def generate_momentum(self) :
-        self.momentum = torch.randn(self.model.n_params())
+        self.momentum = torch.randn(self.model.n_params())    
         
     def update_momentum(self, delta=1) :
         N = np.shape(self.model.y)[0]
@@ -110,85 +162,48 @@ class thermostat(object) :
     
     def total_energy(self) :
         return self.potential_energy() + self.kinetic_energy()     
-
         
-class sampler(object) :
-
-    __metaclass__ = abc.ABCMeta
-    
-    def __init__(self, thermostat, Nsteps) :
-        self.thermostat = thermostat
-        self.Nsteps = Nsteps
-        self.chain = torch.zeros(self.Nsteps+1, self.thermostat.model.n_params())
-        self.n_accepted = 0
-    
-    def feed(self, t) :
-        self.chain[t+1] = self.thermostat.model.get_params()
-    
-    def ESS(self) :
-        return self.Nsteps/np.asarray([gewer_estimate_IAT(self.chain[:,i].numpy()) for i in range(np.shape(self.chain)[1])])
-    
-    def plot(self) :
-        ypred_final = self.thermostat.model.nn_model(self.thermostat.model.x)
-        plt.plot(list(ypred_final[:,0]), list(ypred_final[:,1]), 'o', markersize=2)
-        plt.grid(True)
-
-    def step(self):
-        raise NotImplementedError()
-        
-    def run(self) :
-        self.feed(0)
-        start_time = time()
-        for t in range(self.Nsteps) :         
-            self.step()
-            self.feed(t)
-            if ((t+1) % (int(self.Nsteps/10)) == 0) or (t+1) == self.Nsteps :
-                print("iter %6d/%d after %.2f min | accept_rate %.3f | MSE loss %.3f" % (
-                      t+1, self.Nsteps, (time() - start_time)/60, float(self.n_accepted) / float(t+1), 
-                      nn.MSELoss()(self.thermostat.model.nn_model(self.thermostat.model.x), self.thermostat.model.y)))
-    
     
 #################################################################################################
 #--------------------------------------------- HMC ---------------------------------------------#
-#################################################################################################        
-        
-class HMC(sampler) :
+#################################################################################################   
+
+
+class HMC(kineticMH) :
     
-    __metaclass__ = abc.ABCMeta
-    
-    def __init__(self, thermostat, Nsteps, n_leapfrog):
-        sampler.__init__(self, thermostat, Nsteps)
+    def __init__(self, model, Nsteps, stepsize, n_leapfrog, M_precond=0) :
+        kineticMH.__init__(self, model, Nsteps, M_precond, stepsize) 
         self.n_leapfrog = n_leapfrog
         self.minlf = 50
         self.maxlf = 500
         self.minstepsize = 1e-3
-
-
-    def leapfrog(self) :
-        self.thermostat.model.update_grad()
-        self.thermostat.generate_momentum()  
-        energy_start = self.thermostat.total_energy()
+    
+    def propose(self) :   # using leapfrog
+        self.model.update_grad()
+        self.generate_momentum()  
+        energy_start = self.total_energy()
         # half step for momentum at beginning
-        self.thermostat.update_momentum(1/2)        
+        self.update_momentum(1/2)        
         # leapfrog steps:
         for l in range(self.n_leapfrog) :
             # Full step for position
-            self.thermostat.update_position()
+            self.update_position()
             # full step for momentum, except at end 
             if l < self.n_leapfrog-1 :
-                self.thermostat.update_momentum()
+                self.update_momentum()
         # half step for momentum at end :
-        self.thermostat.update_momentum(1/2)
+        self.update_momentum(1/2)
         # Negate momentum at end to make proposal symmetric
-        self.thermostat.momentum.mul_(-1)
-        energy_end = self.thermostat.total_energy()
+        self.momentum.mul_(-1)
+        energy_end = self.total_energy()
         
         return self, energy_start, energy_end
+    
 
     def step(self) :
 
-        start_nn_model = deepcopy(self.thermostat.model.nn_model)
-        self, energy_start, energy_end = self.leapfrog()
+        start_nn_model = deepcopy(self.model.nn_model)
+        self, energy_start, energy_end = self.propose()
 
         # Accept/reject
         energy_diff = energy_end - energy_start
@@ -200,7 +215,7 @@ class HMC(sampler) :
             accepted = (npr.rand() < np.exp(energy_diff))
             self.n_accepted += accepted
             if not accepted :
-                self.thermostat.model.nn_model = start_nn_model
+                self.model.nn_model = start_nn_model
                 
         del start_nn_model
                 
@@ -210,57 +225,56 @@ class HMC(sampler) :
             self.n_leapfrog = self.maxlf 
         elif self.n_leapfrog < self.minlf :
             self.n_leapfrog = self.minlf
-        if self.thermostat.stepsize < self.minstepsize :
-            self.thermostat.stepsize = self.minstepsize
+        if self.stepsize < self.minstepsize :
+            self.stepsize = self.minstepsize
     
     def adapt_leapfrog(self, t) :
         if self.n_accepted <= 0.2*t :
             self.n_leapfrog = int(self.n_leapfrog/1.5)
-            self.thermostat.stepsize /= 1.05
+            self.stepsize /= 1.05
         elif self.n_accepted >= 0.8*t :
             self.n_leapfrog *= int(self.n_leapfrog*1.5)
-            self.thermostat.stepsize *= 1.05
-        self.limitleapfrog()
+            self.stepsize *= 1.05
+        self.limitleapfrog()    
+    
         
-    
-    
-
 #################################################################################################
 #-------------------------------------------- BAOAB --------------------------------------------#
 #################################################################################################
         
         
-class BAOAB(sampler) :
+class BAOAB(kineticMH) :
     
-    __metaclass__ = abc.ABCMeta
     
-    def __init__(self, thermostat, Nsteps, beta, gamma):
-        sampler.__init__(self, thermostat, Nsteps)
+    def __init__(self, model, Nsteps, stepsize, beta, gamma, M_precond=0) :
+        
+        kineticMH.__init__(self, model, Nsteps, M_precond, stepsize) 
         self.beta = beta 
         self.gamma = gamma
-        self.alpha = np.exp(-self.gamma*self.thermostat.stepsize)
-        self.Rn = torch.randn(self.thermostat.model.n_params())
+        self.alpha = np.exp(-self.gamma*self.stepsize)
+        self.Rn = torch.randn(self.model.n_params())
+            
         
     def propose(self) :
-        pos, grad = self.thermostat.model.get_params(), self.thermostat.model.grad()
+        pos, grad = self.model.get_params(), self.model.grad()
         
         # half step for momentum:
-        self.thermostat.update_momentum(1/2)
-        p1 = deepcopy(self.thermostat.momentum.data)
+        self.update_momentum(1/2)
+        p1 = deepcopy(self.momentum.data)
         
         # half step for position:
-        self.thermostat.update_position(1/2)
+        self.update_position(1/2)
         
         # update momentum with random variables:
-        self.Rn = torch.randn(self.thermostat.model.n_params())
-        self.thermostat.momentum = self.alpha*self.thermostat.momentum + np.sqrt((1-self.alpha**2)/self.beta)*self.Rn
-        p2 = deepcopy(self.thermostat.momentum.data)
+        self.Rn = torch.randn(self.model.n_params())
+        self.momentum = self.alpha*self.momentum + np.sqrt((1-self.alpha**2)/self.beta)*self.Rn
+        p2 = deepcopy(self.momentum.data)
         
         # half step for position
-        self.thermostat.update_position(1/2)
+        self.update_position(1/2)
         
         # half step for momentum:
-        self.thermostat.update_momentum(1/2)
+        self.update_momentum(1/2)
         
         return self, p1, p2
         
@@ -268,10 +282,10 @@ class BAOAB(sampler) :
         return torch.exp(-self.beta/(2*(1-self.alpha**2)*torch.norm(x)))
         
     def step(self) :
-        energy_start = self.thermostat.total_energy()
-        model_start, momentum_start = deepcopy(self.thermostat.model), deepcopy(self.thermostat.momentum)
+        energy_start = self.total_energy()
+        model_start, momentum_start = deepcopy(self.model), deepcopy(self.momentum)
         self, p1, p2 = self.propose()
-        energy_end = self.thermostat.total_energy()
+        energy_end = self.total_energy()
         accept_ratio = torch.exp(-self.beta*(energy_end-energy_start))*self.g(self.alpha*p2-p1)/self.g(self.Rn)
         #print(accept_ratio)
         u = torch.rand(1)
@@ -280,11 +294,11 @@ class BAOAB(sampler) :
         self.n_accepted += accepted
         
         if not accepted :                     # if reject
-            self.thermostat.model = deepcopy(model_start)   # set position to initial position
-            self.thermostat.momentum = deepcopy(-momentum_start)           # momentum has sign flipped
+            self.model = deepcopy(model_start)   # set position to initial position
+            self.momentum = deepcopy(-momentum_start)           # momentum has sign flipped
             
         del model_start, momentum_start, p1, p2
-        self.thermostat.model.update_grad()
+        self.model.update_grad()
         
         
     
@@ -330,7 +344,6 @@ def gewer_estimate_IAT(np_mcmc_traj, verbose=False):
     IAT = 1 + 2 * np.sum(acf[1:n_stop])
     return IAT
              
-
 def init_normal(nn_model) :
     for layer in nn_model :
         if type(layer) == nn.Linear :
