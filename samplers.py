@@ -99,6 +99,8 @@ class MH(nn_sampler) :
     def __init__(self, model, Nsteps, M_precond) :
         nn_sampler.__init__(self, model, Nsteps, M_precond)
         self.n_accepted = 0
+        self.accepted = []
+        self.ysamples = torch.zeros(int(Nsteps/10), model.y.shape[0], model.y.shape[1])
         
     def propose(self) :
         raise NotImplementedError()
@@ -108,16 +110,18 @@ class MH(nn_sampler) :
         
     def run(self) :
         self.feed(0)
+        counter = 0
         start_time = time()
         for t in range(self.Nsteps) :         
             self.step()
             self.feed(t)
             if ((t+1) % (int(self.Nsteps/10)) == 0) or (t+1) == self.Nsteps :
-                print("iter %6d/%d after %.2f min | accept_rate %.1f percent | MSE loss %.3f" % (
-                      t+1, self.Nsteps, (time() - start_time)/60, 100*float(self.n_accepted) / float(t+1), 
+                print("iter %d/%d after %.2f min | accept_rate %.1f percent | MSE loss %.3f" % (
+                      t+1, self.Nsteps, (time() - start_time)/60, 100*float(sum(self.accepted)) / float(t+1), 
                       nn.MSELoss()(self.model.nn_model(self.model.x), self.model.y)))
-    
-    
+            if (t+1)%10 == 0 :
+                self.ysamples[counter] = self.model.nn_model(self.model.x)
+                counter += 1
         
 class kineticMH(MH) :
     __metaclass__ = abc.ABCMeta
@@ -135,8 +139,12 @@ class kineticMH(MH) :
     def update_momentum(self, delta=1) :
         N = np.shape(self.model.y)[0]
         param, param_grad = self.model.get_params(), self.model.grad()
-        log_ll_grad = N*param_grad/(2*self.model.error_sigma**2)
-        log_pr_grad = param/self.model.prior_sigma**2
+        n_theta = self.model.n_params() - N
+        
+        log_ll_grad = N/(2*self.model.error_sigma**2)*param_grad
+        log_pr_grad = torch.zeros(self.model.n_params())
+        log_pr_grad[:n_theta] = param[:n_theta]/self.model.prior_sigma**2
+        log_pr_grad[n_theta::] = param[n_theta::]
         momentum_change = -delta*self.stepsize*(torch.add(log_ll_grad,log_pr_grad))
         self.momentum += momentum_change  
         
@@ -187,10 +195,10 @@ class HMC(kineticMH) :
         # leapfrog steps:
         for l in range(self.n_leapfrog) :
             # Full step for position
-            self.update_position()
+            self.update_position(1)
             # full step for momentum, except at end 
             if l < self.n_leapfrog-1 :
-                self.update_momentum()
+                self.update_momentum(1)
         # half step for momentum at end :
         self.update_momentum(1/2)
         # Negate momentum at end to make proposal symmetric
@@ -206,17 +214,17 @@ class HMC(kineticMH) :
         self, energy_start, energy_end = self.propose()
 
         # Accept/reject
-        energy_diff = energy_end - energy_start
+        energy_diff = energy_start - energy_end
         if energy_diff > 10 :
             accepted = True 
         elif energy_diff < -10 :
             accepted = False 
         else :
-            accepted = (npr.rand() < np.exp(energy_diff))
+            accepted = (torch.rand(1) < torch.exp(energy_diff))
             self.n_accepted += accepted
             if not accepted :
-                self.model.nn_model = start_nn_model
-                
+                self.model.nn_model = deepcopy(start_nn_model)
+        self.accepted.append(int(accepted))
         del start_nn_model
                 
         
@@ -309,6 +317,7 @@ class BAOAB(kineticMH) :
 """
 Functions for convergence diagnostics:
 """
+
 
 def compute_acf(X):
     """
