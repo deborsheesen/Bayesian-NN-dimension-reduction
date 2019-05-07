@@ -2,11 +2,13 @@
 
 import numpy as np, torch, numpy.random as npr, torch.nn as nn, copy, timeit
 from torch.distributions.bernoulli import Bernoulli 
+import torch.nn.functional as F, torch.autograd as autograd, torch.optim as optim
 from scipy import signal as sp
 from time import time
 import matplotlib.pyplot as plt
 from copy import deepcopy
 import abc
+from torch.autograd import Variable
 
 from pylab import plot, show, legend
 
@@ -357,3 +359,80 @@ def init_normal(nn_model) :
     for layer in nn_model :
         if type(layer) == nn.Linear :
             nn.init.normal_(layer.weight)
+            
+            
+            
+            
+class inout_model(object) : 
+    def __init__(self, X_dim, h_dim, Z_dim):
+        # self.radius is an instance variable
+        self.Wxh = 0
+        self.bxh = 0
+        self.Whz_mu = 0
+        self.bhz_mu = 0
+        self.Whz_var = 0
+        self.bhz_var = 0
+        self.Wzh = 0
+        self.bzh = 0
+        self.Whx = 0
+        self.bhx = 0
+        self.X_dim = X_dim
+        self.h_dim = h_dim
+        self.Z_dim = Z_dim
+        self.params = [self.Wxh, self.bxh, self.Whz_mu, self.bhz_mu, self.Whz_var, 
+                       self.bhz_var, self.Wzh, self.bzh, self.Whx, self.bhx]
+        
+    def set_params(self) :
+        self.params = [self.Wxh, self.bxh, self.Whz_mu, self.bhz_mu, self.Whz_var, 
+                       self.bhz_var, self.Wzh, self.bzh, self.Whx, self.bhx]
+        
+    def xavier_init(self, size):
+        in_dim = size[0]
+        xavier_stddev = 1/np.sqrt(in_dim/2)
+        return Variable(torch.randn(*size) * xavier_stddev, requires_grad=True)
+    
+    def initialise(self) :
+        self.Wxh = self.xavier_init(size=[self.X_dim, self.h_dim])
+        self.bxh = Variable(torch.zeros(self.h_dim), requires_grad=True)
+        self.Whz_mu = self.xavier_init(size=[self.h_dim, self.Z_dim])
+        self.bhz_mu = Variable(torch.zeros(self.Z_dim), requires_grad=True)
+        self.Whz_var = self.xavier_init(size=[self.h_dim, self.Z_dim])
+        self.bhz_var = Variable(torch.zeros(self.Z_dim), requires_grad=True)
+        self.Wzh = self.xavier_init(size=[self.Z_dim, self.h_dim])
+        self.bzh = Variable(torch.zeros(self.h_dim), requires_grad=True)
+        self.Whx = self.xavier_init(size=[self.h_dim, self.X_dim])
+        self.bhx = Variable(torch.zeros(self.X_dim), requires_grad=True)
+        self.set_params()
+        
+    # ============================= Q(z|X); encoding ================================
+    def Q(self, X):
+        h = F.tanh(X @ self.Wxh + self.bxh.repeat(X.size(0), 1))
+        z_mu = h @ self.Whz_mu + self.bhz_mu.repeat(h.size(0), 1)
+        z_var = h @ self.Whz_var + self.bhz_var.repeat(h.size(0), 1)
+        return z_mu, z_var
+    
+    def sample_z(self, mu, log_var, mb_size):
+        eps = Variable(torch.randn(mb_size, self.Z_dim))
+        return mu + torch.exp(log_var/2) * eps
+    
+    # ============================= P(X|z); decoding ================================
+    def P(self, z):
+        h = F.tanh(z @ self.Wzh + self.bzh.repeat(z.size(0), 1))
+        X = h @ self.Whx + self.bhx.repeat(h.size(0), 1)
+        return X
+    
+    # =============================== Optimising ====================================
+    def solve(self, loss, lr) :
+        loss.backward(retain_graph=True)
+        solver = optim.Adam(self.params, lr=lr)
+        solver.step()
+        self.set_params()
+        
+    def housekeeping(self) :
+        for p in self.params:
+            if p.grad is not None:
+                data = p.grad.data
+                p.grad = Variable(data.new().resize_as_(data).zero_())
+                
+                
+                
