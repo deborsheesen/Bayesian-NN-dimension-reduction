@@ -1,7 +1,7 @@
 # Reference for HMC: Figure 2 of https://arxiv.org/pdf/1206.1901.pdf
 
 import numpy as np, torch, numpy.random as npr, torch.nn as nn, copy, timeit
-from torch.distributions.bernoulli import Bernoulli 
+from scipy.stats import invgamma
 import torch.nn.functional as F, torch.autograd as autograd, torch.optim as optim
 from scipy import signal as sp
 from time import time
@@ -20,12 +20,12 @@ np.seterr(all='raise')
 #################################################################################################
 
 class model(object):
-    def __init__(self, x, y, prior_sigma, error_sigma, nn_model):
+    def __init__(self, x, y, prior_sigma, error_sigma2, nn_model):
         # self.radius is an instance variable
         self.x = x
         self.y = y
         self.prior_sigma = prior_sigma
-        self.error_sigma = error_sigma
+        self.error_sigma2 = error_sigma2
         self.nn_model = nn_model
         
     def shape(self) :
@@ -38,8 +38,6 @@ class model(object):
         for param in self.nn_model.parameters() :
             if not (param.grad is None) :
                 param.grad.data.zero_()
-        if not (self.x.grad is None) :
-            self.x.grad.data.zero_()
         loss = nn.MSELoss()(self.nn_model(self.x), self.y)
         loss.backward(retain_graph=True)
 
@@ -48,13 +46,13 @@ class model(object):
         self.update_grad()
 
     def n_params(self) :
-        return (sum(p.numel() for p in self.nn_model.parameters()) + np.prod(np.shape(self.x))).item()
+        return sum(p.numel() for p in self.nn_model.parameters())
 
     def get_params(self) :
-        return torch.cat([torch.cat([param.view(-1) for param in self.nn_model.parameters()]), self.x.view(-1)]).data
+        return torch.cat([param.view(-1) for param in self.nn_model.parameters()])
 
     def grad(self) :
-        return torch.cat([torch.cat([param.grad.view(-1) for param in self.nn_model.parameters()]), self.x.grad.view(-1)]).data
+        return torch.cat([param.grad.view(-1) for param in self.nn_model.parameters()])
     
     def set_params(self, param) :
         assert len(param) == self.n_params(), "Number of parameters do not match"
@@ -63,10 +61,7 @@ class model(object):
         for i, parameter in enumerate(self.nn_model.parameters()) :
             parameter.data = param[counter:(counter+np.prod(shapes[i]))].reshape(shapes[i])
             counter += np.prod(shapes[i])  
-        self.x.data = param[counter::].data.reshape(np.shape(self.x)).clone()
         self.update_grad() 
-        
-        
         
         
 class nn_sampler(object):
@@ -78,9 +73,11 @@ class nn_sampler(object):
     def __init__(self, model, Nsteps, M_precond) :
         self.model = model
         self.Nsteps = Nsteps
-        self.chain = torch.zeros(self.Nsteps+1, self.model.n_params())
+        self.chain = torch.zeros(self.Nsteps+1, self.model.n_params()+1)
+        self.chain[0,:self.model.n_params()] = self.model.get_params()
+        self.chain[0,-1] = self.model.error_sigma2
         self.M_precond = M_precond
-        if self.M_precond == 0 :
+        if self.M_precond == None :
             self.M_precond = torch.eye(self.model.n_params())
             
     def plot(self) :
@@ -89,48 +86,68 @@ class nn_sampler(object):
         plt.grid(True)
             
     def ESS(self) :
-        return self.Nsteps/np.asarray([gewer_estimate_IAT(self.chain[:,i].numpy()) for i in range(np.shape(self.chain)[1])])        
+        return self.Nsteps/np.asarray([gewer_estimate_IAT(self.chain[:,i].numpy()) for i in range(np.shape(self.chain)[1])])  
+    
+    def log_target(self) :
+        N = np.shape(self.model.y)[0]
+        param = self.model.get_params()
+        log_ll = -N/(2*self.model.error_sigma2)*nn.MSELoss()(self.model.nn_model(self.model.x), self.model.y)
+        log_pr = -1/(2*self.model.prior_sigma**2)*sum(param**2)
+        return log_ll + log_pr
             
         
         
-class MH(nn_sampler) :
+class Gibbs_MH(nn_sampler) :
     __metaclass__ = abc.ABCMeta
     '''
-    Base class for MH samplers
+    Base class for Gibbs_MH samplers
     '''    
     def __init__(self, model, Nsteps, M_precond) :
         nn_sampler.__init__(self, model, Nsteps, M_precond)
         self.n_accepted = 0
         self.accepted = []
         self.ysamples = torch.zeros(int(Nsteps/10), model.y.shape[0], model.y.shape[1])
+        self.loss = np.zeros(Nsteps)
+        self.alpha = 5
+        self.beta = 1
         
     def propose(self) :
         raise NotImplementedError()
         
     def feed(self, t) :
-        self.chain[t+1] = self.model.get_params()
+        self.chain[t+1,:self.model.n_params()] = self.model.get_params()
+        self.chain[t+1,-1] = self.model.error_sigma2
+        
+    def update_sigma(self) :
+        N = np.shape(self.model.y)[0]
+        a = self.alpha + N/2
+        b = self.beta + N/2*nn.MSELoss()(self.model.nn_model(self.model.x), self.model.y).detach().numpy()
+        self.model.error_sigma2 = invgamma.rvs(a=a,scale=b)
         
     def run(self) :
         self.feed(0)
         counter = 0
         start_time = time()
-        for t in range(self.Nsteps) :         
+        for t in range(self.Nsteps) :  
+            self.update_sigma()
             self.step()
             self.feed(t)
-            if ((t+1) % (int(self.Nsteps/10)) == 0) or (t+1) == self.Nsteps :
+            
+            if ((t+1) % (int(self.Nsteps/10)) == 0) :
                 print("iter %d/%d after %.2f min | accept_rate %.1f percent | MSE loss %.3f" % (
                       t+1, self.Nsteps, (time() - start_time)/60, 100*float(sum(self.accepted)) / float(t+1), 
                       nn.MSELoss()(self.model.nn_model(self.model.x), self.model.y)))
             if (t+1)%10 == 0 :
                 self.ysamples[counter] = self.model.nn_model(self.model.x)
                 counter += 1
+            self.loss[t] = nn.MSELoss()(self.model.nn_model(self.model.x), self.model.y).detach().numpy()
         
-class kineticMH(MH) :
+class kineticMH(Gibbs_MH) :
     __metaclass__ = abc.ABCMeta
     
     def __init__(self, model, Nsteps, M_precond, stepsize) :
         
-        MH.__init__(self, model, Nsteps, M_precond)
+        Gibbs_MH.__init__(self, model, Nsteps, M_precond)
         self.momentum = torch.randn(self.model.n_params())
         self.position = self.model.get_params()
         self.stepsize = stepsize
@@ -138,33 +155,12 @@ class kineticMH(MH) :
     def generate_momentum(self) :
         self.momentum = torch.randn(self.model.n_params())    
         
-    def update_momentum(self, delta=1) :
-        N = np.shape(self.model.y)[0]
-        param, param_grad = self.model.get_params(), self.model.grad()
-        n_theta = self.model.n_params() - N
-        
-        log_ll_grad = N/(2*self.model.error_sigma**2)*param_grad
-        log_pr_grad = torch.zeros(self.model.n_params())
-        log_pr_grad[:n_theta] = param[:n_theta]/self.model.prior_sigma**2
-        log_pr_grad[n_theta::] = param[n_theta::]
-        momentum_change = -delta*self.stepsize*(torch.add(log_ll_grad,log_pr_grad))
-        self.momentum += momentum_change  
-        
-    def update_position(self, delta=1) :
-        pos_change = delta*self.stepsize*self.momentum/torch.diag(self.M_precond)
-        param = self.model.get_params() + pos_change
-        self.model.set_params(param)
-        # update gradients based on new parameters (ie, new positions):
-        self.model.update_grad()
-        
     def potential_energy(self) :
         N = np.shape(self.model.y)[0]
         #from likelihood:
-        pot_energy = N*nn.MSELoss()(self.model.nn_model(self.model.x), self.model.y).data/(2*self.model.error_sigma**2)
+        pot_energy = N*nn.MSELoss()(self.model.nn_model(self.model.x), self.model.y).data/(2*self.model.error_sigma2)
         # from prior:
-        for param in self.model.nn_model.parameters() :  # for theta
-            pot_energy += (param**2).sum().data/(2*self.model.prior_sigma**2)
-        pot_energy += (self.model.x**2).sum().data/(2*self.model.prior_sigma**2) #for x
+        pot_energy += sum(self.model.get_params()**2)/(2*self.model.prior_sigma**2)
         return pot_energy.detach()
     
     def kinetic_energy(self) :
@@ -181,17 +177,33 @@ class kineticMH(MH) :
 
 class HMC(kineticMH) :
     
-    def __init__(self, model, Nsteps, stepsize, n_leapfrog, M_precond=0) :
+    def __init__(self, model, Nsteps, stepsize, n_leapfrog, M_precond=None) :
         kineticMH.__init__(self, model, Nsteps, M_precond, stepsize) 
         self.n_leapfrog = n_leapfrog
-        self.minlf = 50
-        self.maxlf = 500
-        self.minstepsize = 1e-3
     
+    def update_momentum(self, delta=1) :
+        N = np.shape(self.model.y)[0]
+        param, param_grad = self.model.get_params(), self.model.grad()
+        log_ll_grad = N/(2*self.model.error_sigma2)*param_grad
+        log_pr_grad = param/self.model.prior_sigma**2
+        momentum_change = -delta*self.stepsize*(torch.add(log_ll_grad,log_pr_grad))
+        self.momentum += momentum_change  
+        
+    def update_position(self, delta=1) :
+        pos_change = delta*self.stepsize*self.momentum/torch.diag(self.M_precond)
+        param = self.model.get_params() + pos_change
+        self.model.set_params(param)
+        # update gradients based on new parameters (ie, new positions):
+        self.model.update_grad()
+        
     def propose(self) :   # using leapfrog
         self.model.update_grad()
         self.generate_momentum()  
         energy_start = self.total_energy()
+        
+        tot_energy = np.zeros(self.n_leapfrog+1)
+        tot_energy[0] = self.total_energy()
+        
         # half step for momentum at beginning
         self.update_momentum(1/2)        
         # leapfrog steps:
@@ -201,14 +213,14 @@ class HMC(kineticMH) :
             # full step for momentum, except at end 
             if l < self.n_leapfrog-1 :
                 self.update_momentum(1)
+            tot_energy[l+1] = self.total_energy()
         # half step for momentum at end :
         self.update_momentum(1/2)
         # Negate momentum at end to make proposal symmetric
         self.momentum.mul_(-1)
         energy_end = self.total_energy()
         
-        return self, energy_start, energy_end
-    
+        return self, energy_start, energy_end#, tot_energy
 
     def step(self) :
 
@@ -217,35 +229,72 @@ class HMC(kineticMH) :
 
         # Accept/reject
         energy_diff = energy_start - energy_end
-        if energy_diff > 10 :
+        if energy_diff > 200 :
             accepted = True 
-        elif energy_diff < -10 :
+        elif energy_diff < -200 :
             accepted = False 
         else :
             accepted = (torch.rand(1) < torch.exp(energy_diff))
-            self.n_accepted += accepted
-            if not accepted :
-                self.model.nn_model = deepcopy(start_nn_model)
+        
+        self.n_accepted += accepted
+        if not accepted :
+            self.model.nn_model = deepcopy(start_nn_model)
+            self.model.update_grad()
         self.accepted.append(int(accepted))
+       
         del start_nn_model
                 
+#################################################################################################
+#-------------------------------------------- MALA ---------------------------------------------#
+#################################################################################################  
         
-    def limitleapfrog(self) :
-        if self.n_leapfrog > self.maxlf :
-            self.n_leapfrog = self.maxlf 
-        elif self.n_leapfrog < self.minlf :
-            self.n_leapfrog = self.minlf
-        if self.stepsize < self.minstepsize :
-            self.stepsize = self.minstepsize
+class MALA(kineticMH) :
     
-    def adapt_leapfrog(self, t) :
-        if self.n_accepted <= 0.2*t :
-            self.n_leapfrog = int(self.n_leapfrog/1.5)
-            self.stepsize /= 1.05
-        elif self.n_accepted >= 0.8*t :
-            self.n_leapfrog *= int(self.n_leapfrog*1.5)
-            self.stepsize *= 1.05
-        self.limitleapfrog()    
+    def __init__(self, model, Nsteps, stepsize, M_precond=0) :
+        kineticMH.__init__(self, model, Nsteps, M_precond, stepsize) 
+        
+    def propose(self) :
+        N = np.shape(self.model.y)[0]
+        param, param_grad = self.model.get_params(), self.model.grad()
+        log_ll_grad = -N/(2*self.model.error_sigma2)*param_grad
+        log_pr_grad = -param/self.model.prior_sigma**2
+        log_target_grad = torch.add(log_ll_grad,log_pr_grad)
+        self.generate_momentum()
+        param += torch.add(self.stepsize**2*log_target_grad/2,self.stepsize*self.momentum) 
+        self.model.set_params(param)
+        self.model.update_grad()
+        return param
+    
+    def step(self) :
+
+        log_target_initial = self.log_target()
+        initial, grad_initial = self.model.get_params(), self.model.grad()
+        start_nn_model = deepcopy(self.model.nn_model)
+        
+        proposal = self.propose()
+        grad_proposal = self.model.grad()
+        log_target_proposal = self.log_target()
+        
+        log_move = -1/(2*self.stepsize**2)*sum((proposal-initial-self.stepsize**2*grad_initial/2)**2)     #\theta_n to \theta_star  
+        log_move_reverse = -1/(2*self.stepsize**2)*sum((initial-proposal-self.stepsize**2*grad_proposal/2)**2)   #\theta_star to \theta_n 
+        
+        log_acceptance_ratio = log_target_proposal-log_target_initial+log_move_reverse-log_move
+        #print("Log acceptance ratio:", log_acceptance_ratio.detach().numpy())
+        
+        if log_acceptance_ratio > 200 :
+            accepted = True 
+        elif log_acceptance_ratio < -200 :
+            accepted = False 
+        else :
+            accepted = (torch.rand(1) < torch.exp(log_acceptance_ratio))
+        
+        self.n_accepted += accepted
+        if not accepted :
+            self.model.nn_model = deepcopy(start_nn_model)
+            self.model.update_grad()
+        self.accepted.append(int(accepted))
+        
+        del start_nn_model
     
         
 #################################################################################################
@@ -359,12 +408,15 @@ def init_normal(nn_model) :
     for layer in nn_model :
         if type(layer) == nn.Linear :
             nn.init.normal_(layer.weight)
+            nn.init.normal_(layer.bias)
             
             
-            
+#################################################################################################
+#--------------------------------------------- VAE ---------------------------------------------#
+#################################################################################################  
             
 class inout_model(object) : 
-    def __init__(self, X_dim, h_dim, Z_dim):
+    def __init__(self, X_dim, h_dim, Z_dim, nn_encode, nn_decode):
         # self.radius is an instance variable
         self.Wxh = 0
         self.bxh = 0
@@ -381,6 +433,8 @@ class inout_model(object) :
         self.Z_dim = Z_dim
         self.params = [self.Wxh, self.bxh, self.Whz_mu, self.bhz_mu, self.Whz_var, 
                        self.bhz_var, self.Wzh, self.bzh, self.Whx, self.bhx]
+        self.nn_encode = nn_encode
+        self.nn_decode = nn_decode
         
     def set_params(self) :
         self.params = [self.Wxh, self.bxh, self.Whz_mu, self.bhz_mu, self.Whz_var, 
@@ -406,7 +460,9 @@ class inout_model(object) :
         
     # ============================= Q(z|X); encoding ================================
     def Q(self, X):
-        h = F.tanh(X @ self.Wxh + self.bxh.repeat(X.size(0), 1))
+        #h = F.tanh(X @ self.Wxh + self.bxh.repeat(X.size(0), 1))
+        h = self.nn_encode(X)
+        
         z_mu = h @ self.Whz_mu + self.bhz_mu.repeat(h.size(0), 1)
         z_var = h @ self.Whz_var + self.bhz_var.repeat(h.size(0), 1)
         return z_mu, z_var
@@ -417,8 +473,9 @@ class inout_model(object) :
     
     # ============================= P(X|z); decoding ================================
     def P(self, z):
-        h = F.tanh(z @ self.Wzh + self.bzh.repeat(z.size(0), 1))
-        X = h @ self.Whx + self.bhx.repeat(h.size(0), 1)
+        #h = F.tanh(z @ self.Wzh + self.bzh.repeat(z.size(0), 1))
+        #X = h @ self.Whx + self.bhx.repeat(h.size(0), 1)
+        X = self.nn_decode(z)
         return X
     
     # =============================== Optimising ====================================
