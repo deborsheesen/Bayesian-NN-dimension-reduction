@@ -20,11 +20,11 @@ np.seterr(all='raise')
 #################################################################################################
 
 class model(object):
-    def __init__(self, x, y, prior_sigma, error_sigma2, nn_model):
+    def __init__(self, x, y, prior_sigma2, error_sigma2, nn_model):
         # self.radius is an instance variable
         self.x = x
         self.y = y
-        self.prior_sigma = prior_sigma
+        self.prior_sigma2 = prior_sigma2
         self.error_sigma2 = error_sigma2
         self.nn_model = nn_model
         
@@ -92,7 +92,7 @@ class nn_sampler(object):
         N = np.shape(self.model.y)[0]
         param = self.model.get_params()
         log_ll = -N/(2*self.model.error_sigma2)*nn.MSELoss()(self.model.nn_model(self.model.x), self.model.y)
-        log_pr = -1/(2*self.model.prior_sigma**2)*sum(param**2)
+        log_pr = -1/(2*self.model.prior_sigma2)*sum(param**2)
         return log_ll + log_pr
             
         
@@ -134,7 +134,7 @@ class Gibbs_MH(nn_sampler) :
             self.feed(t)
             
             if ((t+1) % (int(self.Nsteps/10)) == 0) :
-                print("iter %d/%d after %.2f min | accept_rate %.1f percent | MSE loss %.3f" % (
+                print("iter %d/%d after %.1f min | accept_rate %.1f percent | MSE loss %.3f" % (
                       t+1, self.Nsteps, (time() - start_time)/60, 100*float(sum(self.accepted)) / float(t+1), 
                       nn.MSELoss()(self.model.nn_model(self.model.x), self.model.y)))
             if (t+1)%10 == 0 :
@@ -160,7 +160,7 @@ class kineticMH(Gibbs_MH) :
         #from likelihood:
         pot_energy = N*nn.MSELoss()(self.model.nn_model(self.model.x), self.model.y).data/(2*self.model.error_sigma2)
         # from prior:
-        pot_energy += sum(self.model.get_params()**2)/(2*self.model.prior_sigma**2)
+        pot_energy += sum(self.model.get_params()**2)/(2*self.model.prior_sigma2)
         return pot_energy.detach()
     
     def kinetic_energy(self) :
@@ -185,7 +185,7 @@ class HMC(kineticMH) :
         N = np.shape(self.model.y)[0]
         param, param_grad = self.model.get_params(), self.model.grad()
         log_ll_grad = N/(2*self.model.error_sigma2)*param_grad
-        log_pr_grad = param/self.model.prior_sigma**2
+        log_pr_grad = param/self.model.prior_sigma2
         momentum_change = -delta*self.stepsize*(torch.add(log_ll_grad,log_pr_grad))
         self.momentum += momentum_change  
         
@@ -257,7 +257,7 @@ class MALA(kineticMH) :
         N = np.shape(self.model.y)[0]
         param, param_grad = self.model.get_params(), self.model.grad()
         log_ll_grad = -N/(2*self.model.error_sigma2)*param_grad
-        log_pr_grad = -param/self.model.prior_sigma**2
+        log_pr_grad = -param/self.model.prior_sigma2
         log_target_grad = torch.add(log_ll_grad,log_pr_grad)
         self.generate_momentum()
         param += torch.add(self.stepsize**2*log_target_grad/2,self.stepsize*self.momentum) 
