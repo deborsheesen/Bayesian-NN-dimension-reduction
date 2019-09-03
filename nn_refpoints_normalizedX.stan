@@ -7,44 +7,59 @@ data
     int<lower=0> out_dim;
     int<lower=0> hidden_dim;
     int<lower=0> n_ref;
-    matrix[Nobs-n_ref,out_dim] y;
-    matrix[n_ref,out_dim] y_ref;
-    matrix[n_ref,in_dim] X_ref;
+    matrix[out_dim,Nobs-n_ref] y;
+    matrix[out_dim,n_ref] y_ref;
+    matrix[in_dim,n_ref] X_ref;
 }
 parameters 
 {
-    unit_vector[Nobs-n_ref] X_normalized[in_dim];
-    matrix[in_dim, hidden_dim] weights_1;
-    row_vector[hidden_dim] bias_1;
+    //unit_vector[Nobs-n_ref] X[in_dim];
+    //vector[Nobs-n_ref] X[in_dim];
+    
+    vector[in_dim] X[Nobs-n_ref];
+    
+    // matrix[in_dim, hidden_dim] weights_1;
+    
+    unit_vector[hidden_dim] weights_1[in_dim];
+    
+    vector[hidden_dim] bias_1;
     matrix[hidden_dim, out_dim] weights_2;
-    row_vector[out_dim] bias_2;
+    vector[out_dim] bias_2;
     real<lower=0> error_sigma2;
     real<lower=0> prior_sigma2;
 }
 
 transformed parameters
-{
-    matrix[Nobs-n_ref,in_dim] X;
-    for (i in 1:in_dim) 
+{   
+    matrix[in_dim,Nobs-n_ref] X_transformed; 
+    matrix[hidden_dim,in_dim] weights_1_transformed; 
+    for (i in 1:(Nobs-n_ref)) 
     {
-        X[:,i] = X_normalized[i];
+        X_transformed[:,i] = X[i];
+    }
+    for (i in 1:in_dim)
+    {
+        weights_1_transformed[:,i] = weights_1[i];
     }
 }
 
 model 
 {  
     // Latent distribution:
-    for (i in 1:in_dim)
+    for (i in 1:(Nobs-n_ref))
     {
-        X[:,i] ~ normal(0,1);
-    }
+        X[i] ~ normal(0,1);
+    }    
     
     // Priors:
     error_sigma2 ~ cauchy(0,5);
     prior_sigma2 ~ cauchy(0,5);
+    for (i in 1:in_dim)
+    {
+        weights_1[i] ~ normal(0,prior_sigma2);;
+    }
     for (h in 1:hidden_dim)
     {
-        weights_1[:,h] ~ normal(0,prior_sigma2);
         weights_2[h,:] ~ normal(0,prior_sigma2);
     }
     bias_1 ~ normal(0,prior_sigma2);
@@ -53,11 +68,11 @@ model
     // Likelihood:
     for (n in 1:(Nobs-n_ref))
     {
-       y[n] ~ normal(tanh(X[n,:]*weights_1 + bias_1)*weights_2 + bias_2, error_sigma2);
+       y[:,n] ~ normal(weights_2'*tanh(weights_1_transformed*X_transformed[:,n] + bias_1) + bias_2, error_sigma2);
     }
     for (n in 1:n_ref)
     {
-        y_ref[n] ~ normal(tanh(X_ref[n,:]*weights_1 + bias_1)*weights_2 + bias_2, error_sigma2);
+        y_ref[:,n] ~ normal(weights_2'*tanh(weights_1_transformed*X_ref[:,n] + bias_1) + bias_2, error_sigma2);
     }
 }
 
