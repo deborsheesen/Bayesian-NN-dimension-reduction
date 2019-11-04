@@ -7,13 +7,13 @@ data
     int<lower=0> out_dim;
     int<lower=0> hidden_dim;
     int<lower=0> n_ref;
-    matrix[out_dim,Nobs-n_ref] y;
-    matrix[out_dim,n_ref] y_ref;
-    matrix[in_dim,n_ref] X_ref;
+    matrix[out_dim,Nobs-n_ref] X;
+    matrix[out_dim,n_ref] X_ref;
+    matrix[in_dim,n_ref] Z_ref;
 }
 parameters 
 {
-    vector[in_dim] X[Nobs-n_ref];
+    vector[in_dim] Z[Nobs-n_ref];
     unit_vector[hidden_dim] weights_1[in_dim];
     vector[hidden_dim] bias_1;
     matrix[hidden_dim, out_dim] weights_2;
@@ -24,11 +24,11 @@ parameters
 
 transformed parameters
 {   
-    matrix[in_dim,Nobs-n_ref] X_tr; 
+    matrix[in_dim,Nobs-n_ref] Z_tr; 
     matrix[hidden_dim,in_dim] weights_1_tr; 
     for (i in 1:(Nobs-n_ref)) 
     {
-        X_tr[:,i] = X[i];
+        Z_tr[:,i] = Z[i];
     }
     for (i in 1:in_dim)
     {
@@ -41,7 +41,7 @@ model
     // Latent distribution:
     for (i in 1:(Nobs-n_ref))
     {
-        X[i] ~ normal(0,1);
+        Z[i] ~ normal(0,1);
     }    
     
     // Priors:
@@ -61,11 +61,11 @@ model
     // Likelihood:
     for (n in 1:(Nobs-n_ref))
     {
-       y[:,n] ~ normal(weights_2'*tanh(weights_1_tr*X_tr[:,n] + bias_1) + bias_2, error_sigma2);
+       X[:,n] ~ normal(weights_2'*tanh(weights_1_tr*Z_tr[:,n] + bias_1) + bias_2, error_sigma2);
     }
     for (n in 1:n_ref)
     {
-        y_ref[:,n] ~ normal(weights_2'*tanh(weights_1_tr*X_ref[:,n] + bias_1) + bias_2, error_sigma2);
+        X_ref[:,n] ~ normal(weights_2'*tanh(weights_1_tr*Z_ref[:,n] + bias_1) + bias_2, error_sigma2);
     }
 }
 
