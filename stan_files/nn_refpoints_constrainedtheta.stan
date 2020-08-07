@@ -18,8 +18,8 @@ parameters
     vector[hidden_dim] bias_1;
     matrix[hidden_dim, out_dim] weights_2;
     vector[out_dim] bias_2;
-    real<lower=0> error_sigma2;
     real<lower=0> prior_sigma2;
+    real<lower=0> error_sigma2;
 }
 
 transformed parameters
@@ -49,14 +49,14 @@ model
     prior_sigma2 ~ cauchy(0,5);
     for (i in 1:in_dim)
     {
-        weights_1[i] ~ normal(0,prior_sigma2);;
+        weights_1[i] ~ normal(0,1);;
     }
     for (h in 1:hidden_dim)
     {
-        weights_2[h,:] ~ normal(0,prior_sigma2);
+        weights_2[h,:] ~ normal(0,1);
     }
-    bias_1 ~ normal(0,prior_sigma2);
-    bias_2 ~ normal(0,prior_sigma2);
+    bias_1 ~ normal(0,1);
+    bias_2 ~ normal(0,1);
 
     // Likelihood:
     for (n in 1:(Nobs-n_ref))
